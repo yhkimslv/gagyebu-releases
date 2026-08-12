@@ -1,0 +1,30 @@
+name: 가계부 알림
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'    # 5분마다 (깃허브 사정에 따라 조금 늦을 수 있음)
+  workflow_dispatch:          # 손으로 눌러서 시험 실행
+
+concurrency:
+  group: notify
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install --no-audit --no-fund
+        working-directory: notify
+      - run: node send.js
+        working-directory: notify
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          COUPLE_CODE: ${{ secrets.COUPLE_CODE }}
+          VAPID_PUBLIC: ${{ secrets.VAPID_PUBLIC }}
+          VAPID_PRIVATE: ${{ secrets.VAPID_PRIVATE }}
+          UPDATE_URL: https://piggyduo.netlify.app/version.json

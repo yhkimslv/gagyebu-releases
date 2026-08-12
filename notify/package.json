@@ -1,0 +1,6 @@
+{
+  "name": "gagyebu-notify",
+  "private": true,
+  "type": "commonjs",
+  "dependencies": { "web-push": "^3.6.7" }
+}
