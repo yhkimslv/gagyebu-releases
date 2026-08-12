@@ -11,6 +11,8 @@ const webpush = require('web-push');
 const { SUPABASE_URL, SUPABASE_KEY, COUPLE_CODE,
         VAPID_PUBLIC, VAPID_PRIVATE, UPDATE_URL } = process.env;
 const APP = process.env.APP || 'couple';        // couple | personal
+/* 시험할 때 '오늘'을 바꿔볼 수 있게 한다 (평소에는 비워둔다) */
+const now = () => (process.env.TEST_DATE ? new Date(process.env.TEST_DATE + 'T12:00:00Z') : new Date());
 const APP_NAME = APP === 'personal' ? '내 가계부' : '우리 가계부';
 
 /* 설정이 덜 채워졌으면 조용히 건너뛴다.
@@ -53,8 +55,7 @@ async function main() {
 
   /* 개인 가계부는 상대가 없으므로 내역 알림 대신 카드 결제일·예산을 본다 */
   if (APP === 'personal') {
-    const today = new Date();
-    const dd = today.getUTCDate();
+    const today = now();
     const dayStr = today.toISOString().slice(0, 10);
     const tomorrow = new Date(today.getTime() + 86400000).getUTCDate();
 
@@ -117,8 +118,8 @@ async function main() {
     }
 
     /* 2) 고정비 결제일 (매달 1일, 하루 한 번만) */
-    const dayStr = new Date().toISOString().slice(0, 10);
-    if (new Date().getUTCDate() === 1 && state.fixedNotifiedOn !== dayStr) {
+    const dayStr = now().toISOString().slice(0, 10);
+    if (now().getUTCDate() === 1 && state.fixedNotifiedOn !== dayStr) {
       jobs.push({ notTo: null, kind: 'fixed', tag: 'fixed-' + dayStr,
         title: '이번 달 고정비 날이에요 🔁',
         body: '렌트·유틸 선입금과 결제 내역을 넣어주세요.' });
