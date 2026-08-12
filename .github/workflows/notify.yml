@@ -33,7 +33,6 @@ jobs:
           UPDATE_URL: https://piggyduo.netlify.app/version.json
 
       - name: 내 가계부
-        if: ${{ secrets.P_SUPABASE_URL != '' }}
         run: node send.js
         working-directory: notify
         env:

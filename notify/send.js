@@ -13,8 +13,13 @@ const { SUPABASE_URL, SUPABASE_KEY, COUPLE_CODE,
 const APP = process.env.APP || 'couple';        // couple | personal
 const APP_NAME = APP === 'personal' ? '내 가계부' : '우리 가계부';
 
-for (const [k, v] of Object.entries({ SUPABASE_URL, SUPABASE_KEY, COUPLE_CODE, VAPID_PUBLIC, VAPID_PRIVATE })) {
-  if (!v) { console.error('빠진 설정: ' + k); process.exit(1); }
+/* 설정이 덜 채워졌으면 조용히 건너뛴다.
+   (예: 개인 가계부 저장소를 아직 안 만들었을 때 워크플로 전체가 실패하면 안 된다) */
+const missing = Object.entries({ SUPABASE_URL, SUPABASE_KEY, COUPLE_CODE, VAPID_PUBLIC, VAPID_PRIVATE })
+  .filter(([, v]) => !v).map(([k]) => k);
+if (missing.length) {
+  console.log(`설정이 없어 건너뜁니다 (${missing.join(', ')})`);
+  process.exit(0);
 }
 webpush.setVapidDetails('mailto:yhkimslv@berkeley.edu', VAPID_PUBLIC, VAPID_PRIVATE);
 
