@@ -10,6 +10,8 @@ const webpush = require('web-push');
 
 const { SUPABASE_URL, SUPABASE_KEY, COUPLE_CODE,
         VAPID_PUBLIC, VAPID_PRIVATE, UPDATE_URL } = process.env;
+const APP = process.env.APP || 'couple';        // couple | personal
+const APP_NAME = APP === 'personal' ? '내 가계부' : '우리 가계부';
 
 for (const [k, v] of Object.entries({ SUPABASE_URL, SUPABASE_KEY, COUPLE_CODE, VAPID_PUBLIC, VAPID_PRIVATE })) {
   if (!v) { console.error('빠진 설정: ' + k); process.exit(1); }
@@ -23,7 +25,14 @@ const api = (p, opt = {}) => fetch(SUPABASE_URL + '/rest/v1/' + p, { ...opt, hea
 const money = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 async function main() {
-  const metaRes = await api('couple_meta?couple_code=eq.' + encodeURIComponent(COUPLE_CODE) + '&select=*');
+  let metaRes;
+  try {
+    metaRes = await api('couple_meta?couple_code=eq.' + encodeURIComponent(COUPLE_CODE) + '&select=*');
+  } catch (e) {
+    /* 저장소가 잠들었거나 주소가 바뀌었을 때. 다음 차례에 다시 해보면 되므로 조용히 끝낸다. */
+    console.log(`[${APP_NAME}] 저장소에 연결할 수 없어 건너뜁니다 — ${e.cause ? e.cause.code : e.message}`);
+    return;
+  }
   const meta = (await metaRes.json())[0];
   if (!meta) { console.log('커플 정보 없음 — 넘어감'); return; }
 
@@ -37,36 +46,79 @@ async function main() {
 
   const jobs = [];   // { to: member|null(모두), title, body, tag, kind }
 
-  /* 1) 지난번 이후 상대가 넣은 내역 */
-  const eRes = await api('entries?couple_code=eq.' + encodeURIComponent(COUPLE_CODE) +
-    '&updated_at=gt.' + encodeURIComponent(since) + '&deleted=is.false&order=updated_at.asc&limit=50');
-  const entries = await eRes.json();
-  let maxSeen = since;
-  for (const e of entries) {
-    if (e.updated_at > maxSeen) maxSeen = e.updated_at;
-    const who = e.member || e.payer || '';
-    if (e.type === 'expense') {
-      jobs.push({ notTo: who, kind: 'entry', tag: 'e-' + e.id,
-        title: `${who}님이 지출을 입력했어요`,
-        body: `${e.memo || e.category || '지출'} · ${money(e.amount)}` });
-    } else if (e.type === 'income') {
-      jobs.push({ notTo: who, kind: 'entry', tag: 'e-' + e.id,
-        title: `${who}님이 입금을 기록했어요`,
-        body: `${e.memo || e.category || '입금'} · ${money(e.amount)}` });
-    } else if (e.type === 'settle') {
-      jobs.push({ notTo: who, kind: 'settle', tag: 'e-' + e.id,
-        title: `${who}님이 돈을 보냈어요`,
-        body: `${e.memo || '정산'} · ${money(e.amount)}` });
+  /* 개인 가계부는 상대가 없으므로 내역 알림 대신 카드 결제일·예산을 본다 */
+  if (APP === 'personal') {
+    const today = new Date();
+    const dd = today.getUTCDate();
+    const dayStr = today.toISOString().slice(0, 10);
+    const tomorrow = new Date(today.getTime() + 86400000).getUTCDate();
+
+    /* 카드 결제일 하루 전에 알려준다 */
+    for (const m of meta.methods || []) {
+      if (!m.billingDay || m.type !== 'credit') continue;
+      if (Number(m.billingDay) !== tomorrow) continue;
+      const key = 'card-' + m.id + '-' + dayStr;
+      if ((state.notified || []).indexOf(key) >= 0) continue;
+      jobs.push({ notTo: null, kind: 'card', tag: key,
+        title: `${m.emoji || '💳'} ${m.name} 결제일이 내일이에요`,
+        body: '잔액을 확인하고 갚을 금액을 정해보세요.' });
+      state.notified = [...(state.notified || []).slice(-40), key];
+    }
+
+    /* 이번 달 예산을 다 썼을 때 (한 달에 한 번만) */
+    const budget = Number(meta.budget) || 0;
+    if (budget > 0) {
+      const month = dayStr.slice(0, 7);
+      const eRes2 = await api('entries?couple_code=eq.' + encodeURIComponent(COUPLE_CODE) +
+        '&type=eq.expense&deleted=is.false&date=gte.' + month + '-01&select=amount,category&limit=2000');
+      const spent = (await eRes2.json())
+        .filter((e) => e.category !== '고정지출')
+        .reduce((a, e) => a + Number(e.amount), 0);
+      const key = 'budget-' + month;
+      if (spent >= budget && (state.notified || []).indexOf(key) < 0) {
+        jobs.push({ notTo: null, kind: 'budget', tag: key,
+          title: '이번 달 예산을 다 썼어요',
+          body: `예산 ${money(budget)} 중 ${money(spent)} 사용` });
+        state.notified = [...(state.notified || []).slice(-40), key];
+      }
     }
   }
 
-  /* 2) 고정비 결제일 (매달 1일, 하루 한 번만) */
-  const today = new Date().toISOString().slice(0, 10);
-  if (new Date().getUTCDate() === 1 && state.fixedNotifiedOn !== today) {
-    jobs.push({ notTo: null, kind: 'fixed', tag: 'fixed-' + today,
-      title: '이번 달 고정비 날이에요 🔁',
-      body: '렌트·유틸 선입금과 결제 내역을 넣어주세요.' });
-    state.fixedNotifiedOn = today;
+  /* 1) 지난번 이후 상대가 넣은 내역 (커플 가계부만) */
+  let maxSeen = since;
+  if (APP === 'couple') {
+    const eRes = await api('entries?couple_code=eq.' + encodeURIComponent(COUPLE_CODE) +
+      '&updated_at=gt.' + encodeURIComponent(since) + '&deleted=is.false&order=updated_at.asc&limit=50');
+    for (const e of await eRes.json()) {
+      if (e.updated_at > maxSeen) maxSeen = e.updated_at;
+      /* 알림은 '입력하지 않은 쪽'에게 보낸다(member = 입력한 사람).
+         문구에 쓰는 이름은 실제로 돈을 낸/보낸 사람(payer)이다.
+         한 사람이 상대가 낸 걸 대신 입력하는 경우가 있어 둘이 다를 수 있다. */
+      const typedBy = e.member || e.payer || '';
+      const paidBy = e.payer || e.member || '';
+      if (e.type === 'expense') {
+        jobs.push({ notTo: typedBy, kind: 'entry', tag: 'e-' + e.id,
+          title: `${paidBy}님이 지출을 입력했어요`,
+          body: `${e.memo || e.category || '지출'} · ${money(e.amount)}` });
+      } else if (e.type === 'income') {
+        jobs.push({ notTo: typedBy, kind: 'entry', tag: 'e-' + e.id,
+          title: `${paidBy}님이 입금을 기록했어요`,
+          body: `${e.memo || e.category || '입금'} · ${money(e.amount)}` });
+      } else if (e.type === 'settle') {
+        jobs.push({ notTo: typedBy, kind: 'settle', tag: 'e-' + e.id,
+          title: `${paidBy}님이 돈을 보냈어요`,
+          body: `${e.memo || '정산'} · ${money(e.amount)}` });
+      }
+    }
+
+    /* 2) 고정비 결제일 (매달 1일, 하루 한 번만) */
+    const dayStr = new Date().toISOString().slice(0, 10);
+    if (new Date().getUTCDate() === 1 && state.fixedNotifiedOn !== dayStr) {
+      jobs.push({ notTo: null, kind: 'fixed', tag: 'fixed-' + dayStr,
+        title: '이번 달 고정비 날이에요 🔁',
+        body: '렌트·유틸 선입금과 결제 내역을 넣어주세요.' });
+      state.fixedNotifiedOn = dayStr;
+    }
   }
 
   /* 3) 새 버전 */
@@ -76,7 +128,7 @@ async function main() {
       if (v.version && v.version !== state.lastVersion) {
         if (state.lastVersion) {        // 처음 돌 때는 알리지 않는다
           jobs.push({ notTo: null, kind: 'update', tag: 'v-' + v.version,
-            title: `새 버전 ${v.version} 이 나왔어요`,
+            title: `${APP_NAME} 새 버전 ${v.version}`,
             body: v.notes || '앱을 열면 업데이트할 수 있어요.' });
         }
         state.lastVersion = v.version;
@@ -126,7 +178,7 @@ async function main() {
                             updated_at: meta.updated_at }])
   });
 
-  console.log(`기기 ${subs.length}대 · 알릴 일 ${jobs.length}건 · 보냄 ${sent}건` +
+  console.log(`[${APP_NAME}] 기기 ${subs.length}대 · 알릴 일 ${jobs.length}건 · 보냄 ${sent}건` +
               (gone.length ? ` · 만료된 기기 ${gone.length}대 정리` : ''));
 }
 

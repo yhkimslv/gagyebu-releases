@@ -19,12 +19,28 @@ jobs:
           node-version: '20'
       - run: npm install --no-audit --no-fund
         working-directory: notify
-      - run: node send.js
+
+      - name: 우리 가계부
+        run: node send.js
         working-directory: notify
         env:
+          APP: couple
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           COUPLE_CODE: ${{ secrets.COUPLE_CODE }}
           VAPID_PUBLIC: ${{ secrets.VAPID_PUBLIC }}
           VAPID_PRIVATE: ${{ secrets.VAPID_PRIVATE }}
           UPDATE_URL: https://piggyduo.netlify.app/version.json
+
+      - name: 내 가계부
+        if: ${{ secrets.P_SUPABASE_URL != '' }}
+        run: node send.js
+        working-directory: notify
+        env:
+          APP: personal
+          SUPABASE_URL: ${{ secrets.P_SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.P_SUPABASE_KEY }}
+          COUPLE_CODE: ${{ secrets.P_CODE }}
+          VAPID_PUBLIC: ${{ secrets.VAPID_PUBLIC }}
+          VAPID_PRIVATE: ${{ secrets.VAPID_PRIVATE }}
+          UPDATE_URL: https://piggybox.netlify.app/version.json
