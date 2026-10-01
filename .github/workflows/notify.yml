@@ -1,9 +1,9 @@
-name: 가계부 알림
+name: Ledger notifications
 
 on:
   schedule:
-    - cron: '*/5 * * * *'    # 5분마다 (깃허브 사정에 따라 조금 늦을 수 있음)
-  workflow_dispatch:          # 손으로 눌러서 시험 실행
+    - cron: '*/5 * * * *'    # Every five minutes; GitHub may occasionally run it later.
+  workflow_dispatch:          # Allow a manual test run from the Actions tab.
 
 concurrency:
   group: notify
@@ -11,16 +11,20 @@ concurrency:
 
 jobs:
   send:
+    name: Send notifications
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Check out the repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - run: npm install --no-audit --no-fund
+      - name: Install notification dependencies
+        run: npm install --no-audit --no-fund
         working-directory: notify
 
-      - name: 우리 가계부
+      - name: Send Our Ledger notifications
         run: node send.js
         working-directory: notify
         env:
@@ -30,9 +34,10 @@ jobs:
           COUPLE_CODE: ${{ secrets.COUPLE_CODE }}
           VAPID_PUBLIC: ${{ secrets.VAPID_PUBLIC }}
           VAPID_PRIVATE: ${{ secrets.VAPID_PRIVATE }}
+          VAPID_EMAIL: ${{ secrets.VAPID_EMAIL }}
           UPDATE_URL: https://piggyduo.netlify.app/version.json
 
-      - name: 내 가계부
+      - name: Send My Ledger notifications
         run: node send.js
         working-directory: notify
         env:
@@ -42,4 +47,5 @@ jobs:
           COUPLE_CODE: ${{ secrets.P_CODE }}
           VAPID_PUBLIC: ${{ secrets.VAPID_PUBLIC }}
           VAPID_PRIVATE: ${{ secrets.VAPID_PRIVATE }}
+          VAPID_EMAIL: ${{ secrets.VAPID_EMAIL }}
           UPDATE_URL: https://piggybox.netlify.app/version.json
