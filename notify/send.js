@@ -13,7 +13,10 @@ const { SUPABASE_URL, SUPABASE_KEY, COUPLE_CODE,
 const APP = process.env.APP || 'couple';        // couple | personal
 /* TEST_DATE can override "today" in tests; it is normally unset. */
 const now = () => (process.env.TEST_DATE ? new Date(process.env.TEST_DATE + 'T12:00:00Z') : new Date());
-const APP_NAME = APP === 'personal' ? '내 가계부' : '우리 가계부';
+const APP_NAMES = APP === 'personal'
+  ? { ko: '내 가계부', en: 'My Ledger' }
+  : { ko: '우리 가계부', en: 'Our Ledger' };
+const APP_NAME = APP_NAMES.en;
 
 /* Skip quietly when configuration is incomplete. For example, a missing personal
    ledger database must not fail the entire workflow. */
@@ -32,6 +35,14 @@ const H = { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY,
 const api = (p, opt = {}) => fetch(SUPABASE_URL + '/rest/v1/' + p, { ...opt, headers: { ...H, ...(opt.headers || {}) } });
 
 const money = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const message = (koTitle, koBody, enTitle, enBody) => ({
+  ko: { title: koTitle, body: koBody },
+  en: { title: enTitle, body: enBody }
+});
+/* Subscriptions created before language metadata was added keep their original
+   Korean behavior. Only an explicit `en` opts a device into English copy. */
+const subscriptionLanguage = (sub) => sub && sub.lang === 'en' ? 'en' : 'ko';
+const messageFor = (job, lang) => job.messages[lang] || job.messages.ko;
 
 async function main() {
   let metaRes;
@@ -53,7 +64,30 @@ async function main() {
   const state = extra.pushState || {};
   const since = state.lastSeen || new Date(Date.now() - 10 * 60 * 1000).toISOString();
 
-  const jobs = [];   // { to: member|null (everyone), title, body, tag, kind }
+  /* Couple preferences are keyed by member. The personal app historically
+     stored one flat preference object, so accept both shapes. */
+  const prefsFor = (sub) => {
+    const memberPrefs = prefsByName && prefsByName[sub.member];
+    if (memberPrefs && typeof memberPrefs === 'object' && !Array.isArray(memberPrefs)) {
+      return memberPrefs;
+    }
+    return APP === 'personal' && prefsByName && typeof prefsByName === 'object'
+      ? prefsByName : {};
+  };
+
+  const categoryLabel = (type, raw, lang) => {
+    if (!raw) return lang === 'en' ? (type === 'income' ? 'Income' : 'Expense')
+      : (type === 'income' ? '입금' : '지출');
+    const categories = meta.categories && Array.isArray(meta.categories[type])
+      ? meta.categories[type] : [];
+    const category = categories.find((c) => c &&
+      (c.name === raw || c.nameKo === raw || c.nameEn === raw));
+    if (!category) return raw;
+    return (lang === 'en' ? category.nameEn : category.nameKo)
+      || category.name || raw;
+  };
+
+  const jobs = [];   // { notTo: member|null (everyone), messages, tag, kind }
 
   /* The personal ledger has no partner, so check card due dates and the budget. */
   if (APP === 'personal') {
@@ -68,8 +102,11 @@ async function main() {
       const key = 'card-' + m.id + '-' + dayStr;
       if ((state.notified || []).indexOf(key) >= 0) continue;
       jobs.push({ notTo: null, kind: 'card', tag: key,
-        title: `${m.emoji || '💳'} ${m.name} 결제일이 내일이에요`,
-        body: '잔액을 확인하고 갚을 금액을 정해보세요.' });
+        messages: message(
+          `${m.emoji || '💳'} ${m.name} 결제일이 내일이에요`,
+          '잔액을 확인하고 갚을 금액을 정해보세요.',
+          `${m.emoji || '💳'} ${m.name} payment is due tomorrow`,
+          'Check the balance and decide how much to pay.') });
       state.notified = [...(state.notified || []).slice(-40), key];
     }
 
@@ -85,8 +122,11 @@ async function main() {
       const key = 'budget-' + month;
       if (spent >= budget && (state.notified || []).indexOf(key) < 0) {
         jobs.push({ notTo: null, kind: 'budget', tag: key,
-          title: '이번 달 예산을 다 썼어요',
-          body: `예산 ${money(budget)} 중 ${money(spent)} 사용` });
+          messages: message(
+            '이번 달 예산을 다 썼어요',
+            `예산 ${money(budget)} 중 ${money(spent)} 사용`,
+            "You've used this month's budget",
+            `Spent ${money(spent)} of the ${money(budget)} budget.`) });
         state.notified = [...(state.notified || []).slice(-40), key];
       }
     }
@@ -105,17 +145,24 @@ async function main() {
       const typedBy = e.member || e.payer || '';
       const paidBy = e.payer || e.member || '';
       if (e.type === 'expense') {
+        const labelKo = e.memo || categoryLabel('expense', e.category, 'ko');
+        const labelEn = e.memo || categoryLabel('expense', e.category, 'en');
         jobs.push({ notTo: typedBy, kind: 'entry', tag: 'e-' + e.id,
-          title: `${paidBy}님이 지출을 입력했어요`,
-          body: `${e.memo || e.category || '지출'} · ${money(e.amount)}` });
+          messages: message(
+            `${paidBy}님이 지출을 입력했어요`, `${labelKo} · ${money(e.amount)}`,
+            `${paidBy || 'Someone'} added an expense`, `${labelEn} · ${money(e.amount)}`) });
       } else if (e.type === 'income') {
+        const labelKo = e.memo || categoryLabel('income', e.category, 'ko');
+        const labelEn = e.memo || categoryLabel('income', e.category, 'en');
         jobs.push({ notTo: typedBy, kind: 'entry', tag: 'e-' + e.id,
-          title: `${paidBy}님이 입금을 기록했어요`,
-          body: `${e.memo || e.category || '입금'} · ${money(e.amount)}` });
+          messages: message(
+            `${paidBy}님이 입금을 기록했어요`, `${labelKo} · ${money(e.amount)}`,
+            `${paidBy || 'Someone'} recorded income`, `${labelEn} · ${money(e.amount)}`) });
       } else if (e.type === 'settle') {
         jobs.push({ notTo: typedBy, kind: 'settle', tag: 'e-' + e.id,
-          title: `${paidBy}님이 돈을 보냈어요`,
-          body: `${e.memo || '정산'} · ${money(e.amount)}` });
+          messages: message(
+            `${paidBy}님이 돈을 보냈어요`, `${e.memo || '정산'} · ${money(e.amount)}`,
+            `${paidBy || 'Someone'} sent money`, `${e.memo || 'Settlement'} · ${money(e.amount)}`) });
       }
     }
 
@@ -123,8 +170,10 @@ async function main() {
     const dayStr = now().toISOString().slice(0, 10);
     if (now().getUTCDate() === 1 && state.fixedNotifiedOn !== dayStr) {
       jobs.push({ notTo: null, kind: 'fixed', tag: 'fixed-' + dayStr,
-        title: '이번 달 고정비 날이에요 🔁',
-        body: '렌트·유틸 선입금과 결제 내역을 넣어주세요.' });
+        messages: message(
+          '이번 달 고정비 날이에요 🔁', '렌트·유틸 선입금과 결제 내역을 넣어주세요.',
+          "It's time for this month's fixed costs 🔁",
+          'Record the rent, utility advances, and payments.') });
       state.fixedNotifiedOn = dayStr;
     }
   }
@@ -135,9 +184,17 @@ async function main() {
       const v = await (await fetch(UPDATE_URL + '?t=' + Date.now())).json();
       if (v.version && v.version !== state.lastVersion) {
         if (state.lastVersion) {        // Do not notify during the initial run.
+          const genericNotes = typeof v.notes === 'string' ? v.notes.trim() : '';
+          const koNotes = v.notesKo
+            || (/[가-힣]/.test(genericNotes) ? genericNotes : '')
+            || '앱을 열면 업데이트할 수 있어요.';
+          const enNotes = v.notesEn
+            || (genericNotes && !/[가-힣]/.test(genericNotes) ? genericNotes : '')
+            || 'Open the app to update.';
           jobs.push({ notTo: null, kind: 'update', tag: 'v-' + v.version,
-            title: `${APP_NAME} 새 버전 ${v.version}`,
-            body: v.notes || '앱을 열면 업데이트할 수 있어요.' });
+            messages: message(
+              `${APP_NAMES.ko} 새 버전 ${v.version}`, koNotes,
+              `${APP_NAMES.en} ${v.version} is available`, enNotes) });
         }
         state.lastVersion = v.version;
       }
@@ -150,10 +207,19 @@ async function main() {
   if (dry) {
     console.log('— Dry-run mode —');
     for (const j of jobs) {
-      const to = subs.filter((sub) => !(j.notTo && sub.member === j.notTo))
-        .filter((sub) => (prefsByName[sub.member] || {})[j.kind] !== false)
-        .map((sub) => sub.member || '(unnamed)');
-      console.log(`  [${j.kind}] ${j.title} / ${j.body}  → ${to.length ? to.join(', ') : '(no recipients)'}`);
+      const recipients = subs.filter((sub) => !(j.notTo && sub.member === j.notTo))
+        .filter((sub) => prefsFor(sub)[j.kind] !== false);
+      if (!recipients.length) {
+        console.log(`  [${j.kind}] (no recipients)`);
+        continue;
+      }
+      for (const lang of ['ko', 'en']) {
+        const to = recipients.filter((sub) => subscriptionLanguage(sub) === lang)
+          .map((sub) => sub.member || '(unnamed)');
+        if (!to.length) continue;
+        const copy = messageFor(j, lang);
+        console.log(`  [${j.kind}:${lang}] ${copy.title} / ${copy.body}  → ${to.join(', ')}`);
+      }
     }
     console.log(`  Last checked: ${since} → ${maxSeen}`);
     return;
@@ -161,11 +227,12 @@ async function main() {
   for (const j of jobs) {
     for (const sub of subs) {
       if (j.notTo && sub.member === j.notTo) continue;              // Do not notify the author.
-      const pref = prefsByName[sub.member] || {};
+      const pref = prefsFor(sub);
       if (pref[j.kind] === false) continue;                          // This member disabled this notification.
       try {
+        const copy = messageFor(j, subscriptionLanguage(sub));
         await webpush.sendNotification(sub, JSON.stringify({
-          title: j.title, body: j.body, tag: j.tag, url: './'
+          title: copy.title, body: copy.body, tag: j.tag, url: './'
         }));
         sent++;
       } catch (err) {
